@@ -31,9 +31,26 @@
 #define NTP_TIMEOUT_LIMIT 5
 #define LOWEST_ALLOWED_PORT 1024
 #define HIGHEST_PORT 65535
+#define LOGE LOG
 
 static std::string server_name = DEFAULT_NAME;
 static unsigned int max_ntp_timeouts = NTP_TIMEOUT_LIMIT;
+
+static int  audiodelay = -1;
+static dnssd_t *dnssd = NULL;
+static int max_connections = 2;
+static unsigned short display[5] = {0}, tcp[3] = {0}, udp[3] = {0};
+static bool require_password = false;
+static unsigned short pin = 3050;
+static std::string keyfile = "";
+static std::string mac_address = "";
+static std::string dacpfile = "";
+static unsigned short raop_port;
+static unsigned short airplay_port;
+static bool show_client_FPS_data = false;
+
+static bool setup_legacy_pairing = false;
+
 
 static std::string find_mac()
 {
@@ -120,6 +137,7 @@ static int parse_hw_addr(std::string str, std::vector<char> &hw_addr)
 
 auto AirPlay::stop_raop_server() -> int
 {
+  LOG("Stopping raop service");
   if (raop)
   {
     raop_destroy(raop);
@@ -127,6 +145,7 @@ auto AirPlay::stop_raop_server() -> int
   }
   if (dnssd)
   {
+    LOG("Stopping DNSSD");
     dnssd_unregister_raop(dnssd);
     dnssd_unregister_airplay(dnssd);
     dnssd_destroy(dnssd);
@@ -136,14 +155,12 @@ auto AirPlay::stop_raop_server() -> int
 }
 
 auto AirPlay::start_raop_server(std::vector<char> hw_addr,
-                                std::string name,
                                 unsigned short tcp[3],
                                 unsigned short udp[3],
                                 bool debug_log) -> int
 {
   raop_callbacks_t raop_cbs;
   memset(&raop_cbs, 0, sizeof(raop_cbs));
-  raop_cbs.cls = this;
   raop_cbs.conn_init = conn_init;
   raop_cbs.conn_destroy = conn_destroy;
   raop_cbs.conn_reset = conn_reset;
@@ -152,68 +169,69 @@ auto AirPlay::start_raop_server(std::vector<char> hw_addr,
   raop_cbs.video_process = video_process;
   raop_cbs.audio_flush = audio_flush;
   raop_cbs.video_flush = video_flush;
+  raop_cbs.video_pause = video_pause;
+  raop_cbs.video_resume = video_resume;
   raop_cbs.audio_set_volume = audio_set_volume;
   raop_cbs.audio_get_format = audio_get_format;
   raop_cbs.video_report_size = video_report_size;
   raop_cbs.audio_set_metadata = audio_set_metadata;
+  raop_cbs.audio_set_coverart = audio_set_coverart;
+  raop_cbs.audio_set_progress = audio_set_progress;
+  raop_cbs.report_client_request = report_client_request;
+  raop_cbs.display_pin = display_pin;
+  raop_cbs.register_client = register_client;
+  raop_cbs.check_register = check_register;
+  raop_cbs.export_dacp = export_dacp;
 
-  /* set max number of connections = 2 */
-  raop = raop_init(2, &raop_cbs);
-  if (raop == NULL)
-  {
-    LOG("Error initializing raop!");
-    return -1;
+  raop = raop_init(&raop_cbs);
+  if (raop == NULL) {
+      LOGE("Error initializing raop!");
+      return -1;
+  }
+  raop_set_log_callback(raop, log_callback, NULL);
+  raop_set_log_level(raop, debug_log ? LOGGER_DEBUG : LOGGER_INFO);
+  /* set max number of connections = 2 to protect against capture by new client */
+  if (raop_init2(raop, max_connections, mac_address.c_str(), keyfile.c_str())){
+      LOGE("Error initializing raop (2)!");
+      free (raop);
+      return -1;
   }
 
   /* write desired display pixel width, pixel height, refresh_rate, max_fps, overscanned.  */
   /* use 0 for default values 1920,1080,60,30,0; these are sent to the Airplay client      */
 
-  //  if (display[0])
-  //    raop_set_plist(raop, "width", (int)display[0]);
-  //  if (display[1])
-  //    raop_set_plist(raop, "height", (int)display[1]);
-  //  if (display[2])
-  //    raop_set_plist(raop, "refreshRate", (int)display[2]);
-  //  if (display[3])
-  //    raop_set_plist(raop, "maxFPS", (int)display[3]);
-  //  if (display[4])
-  //    raop_set_plist(raop, "overscanned", (int)display[4]);
+  if (display[0]) raop_set_plist(raop, "width", (int) display[0]);
+  if (display[1]) raop_set_plist(raop, "height", (int) display[1]);
+  if (display[2]) raop_set_plist(raop, "refreshRate", (int) display[2]);
+  if (display[3]) raop_set_plist(raop, "maxFPS", (int) display[3]);
+  if (display[4]) raop_set_plist(raop, "overscanned", (int) display[4]);
 
+  if (show_client_FPS_data) raop_set_plist(raop, "clientFPSdata", 1);
   raop_set_plist(raop, "max_ntp_timeouts", max_ntp_timeouts);
+  if (audiodelay >= 0) raop_set_plist(raop, "audio_delay_micros", audiodelay);
+  if (require_password) raop_set_plist(raop, "pin", (int) pin);
 
   /* network port selection (ports listed as "0" will be dynamically assigned) */
   raop_set_tcp_ports(raop, tcp);
   raop_set_udp_ports(raop, udp);
 
-  raop_set_log_callback(raop, log_callback, NULL);
-  raop_set_log_level(raop, debug_log ? RAOP_LOG_DEBUG : LOGGER_INFO);
+  raop_port = raop_get_port(raop);
+  raop_start(raop, &raop_port);
+  raop_set_port(raop, raop_port);
 
-  unsigned short port = raop_get_port(raop);
-  raop_start(raop, &port);
-  raop_set_port(raop, port);
-
-  int error;
-  dnssd = dnssd_init(name.c_str(), strlen(name.c_str()), hw_addr.data(), hw_addr.size(), &error);
-  if (error)
-  {
-    LOG("Could not initialize dnssd library!");
-    stop_raop_server();
-    return -2;
+  if (tcp[2]) {
+      airplay_port = tcp[2];
+  } else {
+      /* is there a problem if this coincides with a randomly-selected tcp raop_mirror_data port?
+       * probably not, as the airplay port is only used for initial client contact */
+      airplay_port = (raop_port != HIGHEST_PORT ? raop_port + 1 : raop_port - 1);
   }
-
-  raop_set_dnssd(raop, dnssd);
-
-  dnssd_register_raop(dnssd, port);
-  if (tcp[2])
-  {
-    port = tcp[2];
+  if (dnssd) {
+      raop_set_dnssd(raop, dnssd);
+  } else {
+      LOGE("raop_set failed to set dnssd");
+      return -2;
   }
-  else
-  {
-    port = (port != HIGHEST_PORT ? port + 1 : port - 1);
-  }
-  dnssd_register_airplay(dnssd, port);
-
   return 0;
 }
 
@@ -283,9 +301,51 @@ auto AirPlay::video_flush(void * /*cls*/) -> void
   LOG(__func__);
 }
 
+auto AirPlay::video_pause(void * /*cls*/) ->void
+{
+  LOG(__func__);
+}
+
+auto AirPlay::video_resume(void * /*cls*/) ->void
+{
+  LOG(__func__);
+}
+
 auto AirPlay::audio_set_volume(void * /*cls*/, float volume) -> void
 {
   LOG(__func__, volume);
+}
+
+auto AirPlay::audio_set_coverart(void * /*cls*/, const void * /*buffer*/, int /*buflen*/) -> void
+{
+  LOG(__func__);
+}
+
+auto AirPlay::audio_set_progress(void * /*cls*/, unsigned int start, unsigned int curr, unsigned int end) -> void
+{
+  LOG(__func__, start, curr, end);
+}
+
+auto AirPlay::display_pin(void * /*cls*/, char * /*pin*/) -> void {
+  LOG(__func__);
+}
+
+auto AirPlay::export_dacp(void * /*cls*/, const char * /*active_remote*/, const char * /*dacp_id*/) -> void {
+  LOG(__func__);
+}
+
+auto AirPlay::register_client(void * /*cls*/, const char * /*device_id*/, const char * /*client_pk*/, const char *client_name) -> void {
+  LOG(__func__, client_name);
+}
+
+auto AirPlay::check_register(void * /*cls*/, const char *client_pk) -> bool {
+  LOG(__func__, client_pk);
+  /* we are not maintaining a list of registered clients */
+  return true;
+}
+
+auto AirPlay::report_client_request(void * /*cls*/, char *deviceid, char * model, char *name, bool * admit) -> void {
+  LOG(__func__, deviceid, model, name, admit);
 }
 
 auto AirPlay::audio_get_format(void * /*cls*/,
@@ -408,6 +468,114 @@ auto AirPlay::log_callback(void * /*cls*/, int level, const char *msg) -> void
   }
 }
 
+static int start_dnssd(std::vector<char> hw_addr, std::string name) {
+    int dnssd_error;
+    int require_pw = (require_password ? 1 : 0);
+    if (dnssd) {
+        LOGE("start_dnssd error: dnssd != NULL");
+        return 2;
+    }
+    dnssd = dnssd_init(name.c_str(), strlen(name.c_str()), hw_addr.data(), hw_addr.size(), &dnssd_error, require_pw);
+    LOG("Started dnssd", dnssd_error, name, dnssd);
+    if (dnssd_error) {
+        LOGE("Could not initialize dnssd library!: error %d", dnssd_error);
+        return 1;
+    }
+    /* after dnssd starts, reset the default feature set here
+    /* (overwrites features set in dnssdint.h */
+    /* default: FEATURES_1 = 0x5A7FFEE6, FEATURES_2 = 0 */
+
+    dnssd_set_airplay_features(dnssd,  0, 0); // AirPlay video supported
+    dnssd_set_airplay_features(dnssd,  1, 1); // photo supported
+    dnssd_set_airplay_features(dnssd,  2, 1); // video protected with FairPlay DRM
+    dnssd_set_airplay_features(dnssd,  3, 0); // volume control supported for videos
+
+    dnssd_set_airplay_features(dnssd,  4, 0); // http live streaming (HLS) supported
+    dnssd_set_airplay_features(dnssd,  5, 1); // slideshow supported
+    dnssd_set_airplay_features(dnssd,  6, 1); //
+    dnssd_set_airplay_features(dnssd,  7, 1); // mirroring supported
+
+    dnssd_set_airplay_features(dnssd,  8, 0); // screen rotation  supported
+    dnssd_set_airplay_features(dnssd,  9, 1); // audio supported
+    dnssd_set_airplay_features(dnssd, 10, 1); //
+    dnssd_set_airplay_features(dnssd, 11, 1); // audio packet redundancy supported
+
+    dnssd_set_airplay_features(dnssd, 12, 1); // FaiPlay secure auth supported
+    dnssd_set_airplay_features(dnssd, 13, 1); // photo preloading  supported
+    dnssd_set_airplay_features(dnssd, 14, 1); // Authentication bit 4:  FairPlay authentication
+    dnssd_set_airplay_features(dnssd, 15, 1); // Metadata bit 1 support:   Artwork
+
+    dnssd_set_airplay_features(dnssd, 16, 1); // Metadata bit 2 support:  Soundtrack  Progress
+    dnssd_set_airplay_features(dnssd, 17, 1); // Metadata bit 0 support:  Text (DAACP) "Now Playing" info.
+    dnssd_set_airplay_features(dnssd, 18, 1); // Audio format 1 support:
+    dnssd_set_airplay_features(dnssd, 19, 1); // Audio format 2 support: must be set for AirPlay 2 multiroom audio
+
+    dnssd_set_airplay_features(dnssd, 20, 1); // Audio format 3 support: must be set for AirPlay 2 multiroom audio
+    dnssd_set_airplay_features(dnssd, 21, 1); // Audio format 4 support:
+    dnssd_set_airplay_features(dnssd, 22, 1); // Authentication type 4: FairPlay authentication
+    dnssd_set_airplay_features(dnssd, 23, 0); // Authentication type 1: RSA Authentication
+
+    dnssd_set_airplay_features(dnssd, 24, 0); //
+    dnssd_set_airplay_features(dnssd, 25, 1); //
+    dnssd_set_airplay_features(dnssd, 26, 0); // Has Unified Advertiser info
+    dnssd_set_airplay_features(dnssd, 27, 1); // Supports Legacy Pairing
+
+    dnssd_set_airplay_features(dnssd, 28, 1); //
+    dnssd_set_airplay_features(dnssd, 29, 0); //
+    dnssd_set_airplay_features(dnssd, 30, 1); // RAOP support: with this bit set, the AirTunes service is not required.
+    dnssd_set_airplay_features(dnssd, 31, 0); //
+
+    LOG("DNSSD Set Featues");
+    for (int i = 32; i < 64; i++) {
+        dnssd_set_airplay_features(dnssd, i, 0);
+    }
+
+    /*  bits 32-63 are  not used here: see  https://emanualcozzi.net/docs/airplay2/features
+    dnssd_set_airplay_features(dnssd, 32, 0); // isCarPlay when ON,; Supports InitialVolume when OFF
+    dnssd_set_airplay_features(dnssd, 33, 0); // Supports Air Play Video Play Queue
+    dnssd_set_airplay_features(dnssd, 34, 0); // Supports Air Play from cloud (requires that bit 6 is ON)
+    dnssd_set_airplay_features(dnssd, 35, 0); // Supports TLS_PSK
+
+    dnssd_set_airplay_features(dnssd, 36, 0); //
+    dnssd_set_airplay_features(dnssd, 37, 0); //
+    dnssd_set_airplay_features(dnssd, 38, 0); //  Supports Unified Media Control (CoreUtils Pairing and Encryption)
+    dnssd_set_airplay_features(dnssd, 39, 0); //
+
+    dnssd_set_airplay_features(dnssd, 40, 0); // Supports Buffered Audio
+    dnssd_set_airplay_features(dnssd, 41, 0); // Supports PTP
+    dnssd_set_airplay_features(dnssd, 42, 0); // Supports Screen Multi Codec
+    dnssd_set_airplay_features(dnssd, 43, 0); // Supports System Pairing
+
+    dnssd_set_airplay_features(dnssd, 44, 0); // is AP Valeria Screen Sender
+    dnssd_set_airplay_features(dnssd, 45, 0); //
+    dnssd_set_airplay_features(dnssd, 46, 0); // Supports HomeKit Pairing and Access Control
+    dnssd_set_airplay_features(dnssd, 47, 0); //
+
+    dnssd_set_airplay_features(dnssd, 48, 0); // Supports CoreUtils Pairing and Encryption
+    dnssd_set_airplay_features(dnssd, 49, 0); //
+    dnssd_set_airplay_features(dnssd, 50, 0); // Metadata bit 3: "Now Playing" info sent by bplist not DAACP test
+    dnssd_set_airplay_features(dnssd, 51, 0); // Supports Unified Pair Setup and MFi Authentication
+
+    dnssd_set_airplay_features(dnssd, 52, 0); // Supports Set Peers Extended Message
+    dnssd_set_airplay_features(dnssd, 53, 0); //
+    dnssd_set_airplay_features(dnssd, 54, 0); // Supports AP Sync
+    dnssd_set_airplay_features(dnssd, 55, 0); // Supports WoL
+
+    dnssd_set_airplay_features(dnssd, 56, 0); // Supports Wol
+    dnssd_set_airplay_features(dnssd, 57, 0); //
+    dnssd_set_airplay_features(dnssd, 58, 0); // Supports Hangdog Remote Control
+    dnssd_set_airplay_features(dnssd, 59, 0); // Supports AudioStreamConnection setup
+
+    dnssd_set_airplay_features(dnssd, 60, 0); // Supports Audo Media Data Control
+    dnssd_set_airplay_features(dnssd, 61, 0); // Supports RFC2198 redundancy
+    */
+
+    /* bit 27 of Features determines whether the AirPlay2 client-pairing protocol will be used (1) or not (0) */
+    dnssd_set_airplay_features(dnssd, 27, (int) setup_legacy_pairing);
+    return 0;
+}
+
+
 AirPlay::AirPlay(struct obs_data *obsData, struct obs_source *obsSource)
   : obsData(obsData),
     obsSource(obsSource),
@@ -427,6 +595,8 @@ AirPlay::AirPlay(struct obs_data *obsData, struct obs_source *obsSource)
     putenv(avahi_compat_nowarn);
 #endif
 
+  /* may need a keyfile */
+
   if (udp[0])
     LOG("using network ports UDP", udp[0], udp[1], udp[2], "TCP", tcp[0], tcp[1], tcp[2]);
 
@@ -444,12 +614,18 @@ AirPlay::AirPlay(struct obs_data *obsData, struct obs_source *obsSource)
     LOG("using system MAC address", mac_address);
   }
   parse_hw_addr(mac_address, server_hw_addr);
-  mac_address.clear();
 
   connections_stopped = true;
 
-  if (start_raop_server(server_hw_addr, server_name, tcp, udp, debug_log) != 0)
-  {
+  LOG("Starting dnssd", server_name.c_str());
+  if (start_dnssd(server_hw_addr, server_name)) {
+    LOG("start_dnssd failed");
+    return;
+  }
+
+  LOG("DNSSD: %p", dnssd);
+
+  if (start_raop_server(server_hw_addr, tcp, udp, debug_log) != 0) {
     LOG("start_raop_server failed");
     return;
   }
@@ -481,7 +657,7 @@ auto AirPlay::render(const h264_decode_struct *pkt) -> void
   }
 
   // set current time in ns
-  obsVFrame->timestamp = pkt->pts * 1'000;
+  obsVFrame->timestamp = pkt->ntp_time_remote * 1'000;
   obs_source_output_video(obsSource, obsVFrame.get());
 }
 
@@ -521,6 +697,6 @@ auto AirPlay::render(const audio_decode_struct *pkt) -> void
   obsAFrame->speakers = aFrame->speakers;
   obsAFrame->samples_per_sec = aFrame->sampleRate;
   // set current time in ns
-  obsAFrame->timestamp = pkt->ntp_time * 1'000;
+  obsAFrame->timestamp = pkt->rtp_time * 1'000;
   obs_source_output_audio(obsSource, obsAFrame.get());
 }

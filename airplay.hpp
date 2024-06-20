@@ -18,7 +18,6 @@ private:
   auto render(const audio_decode_struct *data) -> void;
   auto render(const h264_decode_struct *data) -> void;
   auto start_raop_server(std::vector<char> hw_addr,
-                         std::string name,
                          unsigned short tcp[3],
                          unsigned short udp[3],
                          bool debug_log) -> int;
@@ -35,12 +34,21 @@ private:
   static auto audio_process(void *cls, struct raop_ntp_s *ntp, audio_decode_struct *data) -> void;
   static auto audio_set_metadata(void *cls, const void *buffer, int buflen) -> void;
   static auto audio_set_volume(void *cls, float volume) -> void;
+  static auto audio_set_coverart(void *cls, const void *buffer, int buflen) -> void;
+  static auto audio_set_progress(void *cls, unsigned int start, unsigned int curr, unsigned int end) -> void;
   static auto conn_destroy(void *cls) -> void;
   static auto conn_init(void *cls) -> void;
   static auto conn_reset(void *cls, int timeouts, bool reset_video) -> void;
   static auto conn_teardown(void *cls, bool *teardown_96, bool *teardown_110) -> void;
+  static auto display_pin(void *cls, char *pin) -> void;
+  static auto export_dacp(void *cls, const char *active_remote, const char *dacp_id) -> void;
   static auto log_callback(void *cls, int level, const char *msg) -> void;
+  static auto register_client(void *cls, const char *device_id, const char *client_pk, const char *client_name) -> void;
+  static auto check_register(void *cls, const char *client_pk) -> bool;
+  static auto report_client_request(void *cls, char *deviceid, char * model, char *name, bool * admit) -> void;
   static auto video_flush(void *cls) -> void;
+  static auto video_pause(void *cls) -> void;
+  static auto video_resume(void *cls) -> void;
   static auto video_process(void *cls, struct raop_ntp_s *ntp, h264_decode_struct *data) -> void;
   static auto video_report_size(void *cls,
                                 float *width_source,
