@@ -1,0 +1,13 @@
+Source: obs-airplay
+Section: video
+Priority: extra
+Maintainer: Tux Packaging <packages@tux.org>
+Build-Depends: debhelper-compat (=13), coddle, clang, pkg-config, libssl-dev, libswscale-dev, libavcodec-dev, libavformat-dev, libavutil-dev, libswresample-dev, git, libobs-dev, libavahi-compat-libdnssd-dev, libplist-dev, libfdk-aac-dev
+Standards-Version: 4.6.1
+Homepage: https://www.tuxforge.org/
+
+Package: obs-airplay
+Architecture: any
+Multi-Arch: foreign
+Depends: obs-studio, ${shlibs:Depends}
+Description: The coddle C++ build system
